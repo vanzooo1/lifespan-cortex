@@ -411,6 +411,14 @@ kbd{font-family:'Space Grotesk',sans-serif;font-size:11px;border:1px solid var(-
     <button class="c-close" onclick="closeCoach()">✕</button>
   </div>
   <div class="c-msgs" id="cMsgs"></div>
+  <div id="cBridge" style="display:none;padding:0 16px 10px">
+    <div style="font-size:12px;color:var(--sub,#999);margin-bottom:6px">1. Copy this, paste it into your Claude chat:</div>
+    <textarea id="cCopyBox" readonly rows="3" style="width:100%;font-size:11px;padding:8px;box-sizing:border-box" onclick="this.select()"></textarea>
+    <button class="btn-done" style="margin:8px 0" onclick="copyBridgeText()">Copy</button>
+    <div style="font-size:12px;color:var(--sub,#999);margin:6px 0">2. Paste Claude's reply here, then apply it:</div>
+    <textarea id="cPasteBox" rows="3" placeholder="Paste Claude's reply…" style="width:100%;font-size:12px;padding:8px;box-sizing:border-box"></textarea>
+    <button class="btn-done" style="margin-top:8px" onclick="applyReply()">Apply update</button>
+  </div>
   <div class="c-sugs">
     <button class="sug" onclick="sendSug(this.textContent)">Today felt too heavy</button>
     <button class="sug" onclick="sendSug(this.textContent)">I only have 25 minutes</button>
@@ -508,7 +516,10 @@ function load(){
   if(S.sprint===undefined) S.sprint=null;
   for(var w in DEFAULT_WEIGHTS){ if(S.weights[w]===undefined) S.weights[w]=DEFAULT_WEIGHTS[w]; }
 }
-function iso(d){ return d.toISOString().split("T")[0]; }
+function iso(d){
+  var m=d.getMonth()+1, day=d.getDate();
+  return d.getFullYear()+"-"+(m<10?"0":"")+m+"-"+(day<10?"0":"")+day;
+}
 var TODAY_ISO = iso(TODAY);
 
 function prog(){ return S.program && S.program.length===7 ? S.program : DEFAULT_PROG; }
@@ -1169,8 +1180,19 @@ function pickDay(d){
   } else {
     h+='<div class="rest-note">Rest day. Walk, stretch, hit your protein.</div>';
   }
+  h+='<button class="btn-done" style="margin-top:14px" onclick="toggleDone('+d+')">'+(done?"Mark not done":"Mark done")+'</button>';
   el.innerHTML=h;
   el.style.display="block";
+}
+function toggleDone(d){
+  var date=new Date(calY,calM,d);
+  var di=iso(date);
+  var idx=S.doneDates.indexOf(di);
+  if(idx>=0){ S.doneDates.splice(idx,1); S.sessions=Math.max(0,S.sessions-1); toast("Marked not done"); }
+  else { S.doneDates.push(di); S.sessions++; toast("Marked done — future sessions shift accordingly"); }
+  save();
+  pickDay(d);
+  renderHome();
 }
 
 // ═══════════ EAT ═══════════
@@ -1252,7 +1274,7 @@ function logAi(){
 function clearAi(){ aiPend=null; document.getElementById("aiResult").classList.remove("show"); document.getElementById("aiFood").value=""; }
 
 // ═══════════ COACH ═══════════
-var cHist=[], cBusy=false;
+var cHist=[];
 function openCoach(){
   document.getElementById("coach").classList.add("on");
   if(!cHist.length){
@@ -1295,41 +1317,42 @@ function sendSug(t){ document.getElementById("cInput").value=t; sendCoach(); }
 function sendCoach(){
   var inp=document.getElementById("cInput");
   var t=inp.value.trim();
-  if(!t||cBusy) return;
+  if(!t) return;
   inp.value=""; inp.style.height="auto";
   addM("u",t);
   cHist.push({role:"user",content:t});
-  cBusy=true; document.getElementById("cSend").disabled=true;
-  var el=document.getElementById("cMsgs");
-  var ty=document.createElement("div"); ty.className="typing"; ty.innerHTML='<div class="tdot"></div><div class="tdot"></div><div class="tdot"></div>';
-  el.appendChild(ty); el.scrollTop=el.scrollHeight;
-  fetch("/.netlify/functions/anthropic",{
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:3000,system:sysPrompt(),messages:cHist.slice(-10)})
-  }).then(function(r){return r.json();}).then(function(d){
-    ty.remove();
-    var raw=(d.content&&d.content.filter(function(b){return b.type==="text";}).map(function(b){return b.text;}).join("\n"))||"";
-    var reply=raw, changed=false;
-    try{
-      var clean=raw.replace(/```json|```/g,"").trim();
-      var first=clean.indexOf("{"), last=clean.lastIndexOf("}");
-      if(first>=0&&last>first){
-        var obj=JSON.parse(clean.slice(first,last+1));
-        reply=obj.reply||raw;
-        if(obj.program&&obj.program.length===7){ S.program=obj.program; changed=true; }
-        if(obj.weights){ for(var k in obj.weights){ S.weights[k]=obj.weights[k]; } changed=true; }
-        if(changed) save();
-      }
-    }catch(e){}
-    addM("a",reply);
-    cHist.push({role:"assistant",content:raw});
-    if(changed){ addM("sys","Plan updated ✓"); renderHome(); renderPlan(); }
-    cBusy=false; document.getElementById("cSend").disabled=false;
-  }).catch(function(){
-    ty.remove();
-    addM("a","Connection problem — try again in a moment.");
-    cBusy=false; document.getElementById("cSend").disabled=false;
-  });
+  var convo=cHist.map(function(m){ return (m.role==="user"?"USER: ":"COACH: ")+m.content; }).join("\n");
+  var prompt=sysPrompt()+"\n\nCONVERSATION SO FAR:\n"+convo+"\n\nRespond with just the JSON object described above, nothing else.";
+  document.getElementById("cCopyBox").value=prompt;
+  document.getElementById("cBridge").style.display="block";
+  addM("sys","Copied below ✓ — paste it into your Claude chat, then paste the reply back here and tap Apply.");
+  try{ navigator.clipboard.writeText(prompt); }catch(e){}
+}
+function copyBridgeText(){
+  var box=document.getElementById("cCopyBox");
+  box.select();
+  try{ navigator.clipboard.writeText(box.value); toast("Copied"); }catch(e){ document.execCommand("copy"); toast("Copied"); }
+}
+function applyReply(){
+  var raw=document.getElementById("cPasteBox").value.trim();
+  if(!raw){ toast("Paste Claude's reply first"); return; }
+  var reply=raw, changed=false;
+  try{
+    var clean=raw.replace(/```json|```/g,"").trim();
+    var first=clean.indexOf("{"), last=clean.lastIndexOf("}");
+    if(first>=0&&last>first){
+      var obj=JSON.parse(clean.slice(first,last+1));
+      reply=obj.reply||raw;
+      if(obj.program&&obj.program.length===7){ S.program=obj.program; changed=true; }
+      if(obj.weights){ for(var k in obj.weights){ S.weights[k]=obj.weights[k]; } changed=true; }
+      if(changed) save();
+    }
+  }catch(e){ toast("Could not read that reply — make sure you pasted the whole thing"); return; }
+  addM("a",reply);
+  cHist.push({role:"assistant",content:raw});
+  if(changed){ addM("sys","Plan updated ✓"); renderHome(); renderPlan(); }
+  document.getElementById("cPasteBox").value="";
+  document.getElementById("cBridge").style.display="none";
 }
 
 // ═══════════ MISC ═══════════
